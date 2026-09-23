@@ -1,0 +1,119 @@
+# ============================================================
+# Low-dimensional simulation
+# Target: 0.9-quantile general response difference
+# Estimator: SPERI-K
+# ============================================================
+
+library(truncnorm)
+
+# Simulation settings
+
+n_rep <- 1000
+
+n_p <- 1000
+n_q <- 1000
+n <- n_p+n_q
+pi_p <- n_p/n
+
+beta_1 <- 2
+beta_0 <- 1
+
+tau <- 0.9
+
+# Bandwidth for kernel estimation
+h <- 0.1
+
+# Gaussian kernel function
+
+kern <- function(cond,cond_data,h) {
+  exp(-0.5*apply(as.matrix(cond_data),1,function(x) sum((cond-x)^2))/h^2)/
+    (sqrt(2*pi)*h)
+}
+
+# Storage
+
+results <- matrix(NA_real_,nrow=n_rep,ncol=3,
+                  dimnames=list(NULL,c("estimate","variance","se")))
+
+# Monte Carlo simulation
+
+for (i in 1:n_rep) {
+  
+  set.seed(i)
+  
+  # Generate X
+  
+  x_p <- runif(n_p,-1,1)
+  x_q <- rtruncnorm(n_q,-1,1,0.5,1)
+  
+  # Generate outcomes Y
+  
+  y1_p <- beta_1*x_p+rnorm(n_p,0,1)
+  y1_q <- beta_1*x_q+rnorm(n_q,0,1)
+  y0_p <- beta_0*x_p+rnorm(n_p,0,1)
+  y0_q <- beta_0*x_q+rnorm(n_q,0,1)
+  
+  # Estimate density ratio rho(x)
+  
+  rho_hat <- function(x,h) {
+    result <- mean(kern(x,x_p,h))/mean(kern(x,x_q,h))
+    ifelse(is.nan(result),0,result)
+  }
+  
+  # SPERI-K estimator
+  
+  theta_p1_hat <- quantile(y1_p,tau)
+  
+  b_temp <- function(theta_p0,x,h) {
+    result <- mean(kern(x,x_q,h)*((y0_q <= theta_p0)-tau))/
+      mean(kern(x,x_q,h))
+    ifelse(is.nan(result),0,result)
+  }
+  
+  eff_sum <- function(theta_p0) {
+    mean(mapply(function(theta_p0,x,y,h)
+      rho_hat(x,h)*((y <= theta_p0)-tau-b_temp(theta_p0,x,h)),
+      x=x_q,y=y0_q,MoreArgs=list(h=h,theta_p0=theta_p0)))+
+      mean(mapply(b_temp,x=x_p,MoreArgs=list(h=h,theta_p0=theta_p0)))
+  }
+  
+  theta_p0_hat <- uniroot(eff_sum,c(0,2))$root
+  
+  theta_hat <- theta_p1_hat-theta_p0_hat
+  
+  # Variance estimation
+  
+  b_hat <- function(x,h) {
+    result <- mean(kern(x,x_q,h)*((y0_q <= theta_p0_hat)-tau))/
+      mean(kern(x,x_q,h))
+    ifelse(is.nan(result),0,result)
+  }
+  
+  density_est <- density(y1_p,kernel="gaussian",bw="nrd0")
+  B1 <- 1/approx(density_est$x,density_est$y,xout=theta_p1_hat)$y
+  
+  h2 <- 0.2
+  kernel_y0 <- dnorm((y0_q-theta_p0_hat)/h2)/h2
+  
+  rho_q <- sapply(x_q,rho_hat,h=h)
+  B0 <- 1/(sum(rho_q*kernel_y0)/n_q)
+  
+  influence_function <- function(r,y,x) {
+    r/pi_p*(B0*b_hat(x,h)-B1*((y <= theta_p1_hat)-tau))+
+      (1-r)/(1-pi_p)*B0*(((y <= theta_p0_hat)-tau)-b_hat(x,h))*rho_hat(x,h)
+  }
+  
+  IF_p <- mapply(influence_function,rep(1,n_p),y1_p,x_p)
+  IF_q <- mapply(influence_function,rep(0,n_q),y0_q,x_q)
+  
+  variance_hat <- (sum(IF_p^2)+sum(IF_q^2))/n^2
+  se_hat <- sqrt(variance_hat)
+  
+  # Store the results
+  
+  results[i, ] <- c(estimate=theta_hat,variance=variance_hat,se=se_hat)
+}
+
+# Save results
+
+write.csv(results,file="speri_k.csv",row.names=FALSE)
